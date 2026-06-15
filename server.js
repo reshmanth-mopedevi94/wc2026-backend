@@ -99,6 +99,7 @@ function broadcast(data) {
 async function apiFetch(path) {
   const url = `https://${API_HOST}${path}`;
   console.log(`\n🌐 API call #${cache.requestsUsed + 1}: ${url}`);
+  console.log(`🔑 Key length: ${API_KEY ? API_KEY.length : "MISSING"} chars`);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
@@ -107,14 +108,24 @@ async function apiFetch(path) {
     const res = await fetch(url, {
       method: "GET",
       headers: {
-      "x-apisports-key": API_KEY
+        "x-apisports-key": API_KEY
       },
       signal: controller.signal,
     });
     clearTimeout(timeout);
 
+    console.log(`📡 HTTP Status: ${res.status} ${res.statusText}`);
+
+    // Log all response headers for debugging
+    const headersObj = {};
+    res.headers.forEach((v, k) => { headersObj[k] = v; });
+    console.log(`📋 Response headers:`, JSON.stringify(headersObj));
+
+    const rawText = await res.text();
+    console.log(`📄 Raw response (first 500 chars): ${rawText.slice(0, 500)}`);
+
     if (res.status === 429) {
-      console.warn("⚠️  Rate limited (429) — skipping this cycle");
+      console.warn("⚠️  Rate limited (429)");
       return null;
     }
     if (!res.ok) {
@@ -122,9 +133,21 @@ async function apiFetch(path) {
       return null;
     }
 
-    const data = await res.json();
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch(e) {
+      console.error("❌  JSON parse failed:", e.message);
+      return null;
+    }
+
+    // Log errors array from API response
+    if (data.errors && Object.keys(data.errors).length > 0) {
+      console.error("❌  API errors:", JSON.stringify(data.errors));
+    }
+
     cache.requestsUsed++;
-    console.log(`✅  Got ${data.response?.length || 0} fixtures | Total requests: ${cache.requestsUsed}`);
+    console.log(`✅  Results: ${data.results} | Response length: ${data.response?.length || 0} | Total requests: ${cache.requestsUsed}`);
     return data.response || [];
 
   } catch (e) {
