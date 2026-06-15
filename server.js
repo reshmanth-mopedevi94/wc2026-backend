@@ -105,10 +105,9 @@ async function apiFetch(path) {
 
   try {
     const res = await fetch(url, {
+      method: "GET",
       headers: {
-        "x-apisports-key": API_KEY,
-        "x-rapidapi-key":  API_KEY,
-        "x-rapidapi-host": API_HOST,
+      "x-apisports-key": API_KEY
       },
       signal: controller.signal,
     });
