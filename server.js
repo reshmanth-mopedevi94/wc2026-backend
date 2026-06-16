@@ -18,8 +18,8 @@ const cron      = require("node-cron");
 
 const PORT          = process.env.PORT || 3001;
 const BASE_URL      = "https://wcup2026.org/api/data.php";
-const PASSIVE_MS    = 14 * 60 * 1000; // 14 min when no live game
-const LIVE_MS       = 60 * 1000;      // 60s when live game active
+const PASSIVE_MS = 14 * 60 * 1000; // 14 min when no live game
+const LIVE_MS    =  5 * 60 * 1000; // 5 min when live game active
 
 // ─── TEAM NAME MAP ─────────────────────────────────────────────────────────
 const TEAM_MAP = {
@@ -205,7 +205,7 @@ async function fetchAndBroadcast(reason = "cron"){
 
     // Switch polling speed based on live status
     if(liveNow && !liveInterval){
-      console.log("🔴 Live match detected — switching to 60s polling");
+      console.log("🔴 Live match — switching to 5-min polling");
       liveInterval = setInterval(()=>fetchAndBroadcast("live-poll"), LIVE_MS);
     } else if(!liveNow && liveInterval){
       console.log("⏸  No live matches — back to 14-min passive");
@@ -235,7 +235,7 @@ cron.schedule("*/10 * * * *", async () => {
 server.listen(PORT, async () => {
   console.log(`\n🚀 WC2026 Backend on port ${PORT}`);
   console.log(`📦 Source: wcup2026.org (free, no key, live scores)`);
-  console.log(`⏱  Passive: every 14 min | Live: every 60s\n`);
+  console.log(`⏱  Passive: every 14 min | Live: every 5 min\n`);
   await fetchAndBroadcast("startup");
 });
 
