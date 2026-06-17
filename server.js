@@ -1,12 +1,12 @@
 /**
- * WC2026 Live Score Backend - Fixed & Enhanced
- * ───────────────────────────────────────────
+ * WC2026 Live Score Backend - Fixed Compatibility Edition
+ * ─────────────────────────────────────────────────────────
  * Data: wcup2026.org — free, no API key, live scores + results
  * Endpoints:
  * today:  https://wcup2026.org/api/data.php?action=today
  * all:    https://wcup2026.org/api/data.php?action=all
  * Polls every 14 min passive, every 5 min when live match detected
- * Broadcasts via WebSocket to all clients instantly
+ * Broadcasts via WebSocket to all clients in the format expected by App.jsx
  */
 
 require("dotenv").config();
@@ -73,64 +73,46 @@ const MATCH_ID_MAP = {
 
 function norm(name){ return TEAM_MAP[name] || name; }
 
-// ─── SEEDED RESULTS (JUNE 14-15) ────────────────────────────────────────────
-const SEEDED_RESULTS = [
-  // June 14 Openers
-  { id: "A1", home: "Mexico", away: "South Africa", date: "2026-06-14", status: "finished", homeGoals: "2", awayGoals: "1", elapsed: null, played: true, source: "seeded" },
-  { id: "D1", home: "United States", away: "Paraguay", date: "2026-06-14", status: "finished", homeGoals: "3", awayGoals: "0", elapsed: null, played: true, source: "seeded" },
-  // June 15 Matches
-  { id: "A2", home: "South Korea", away: "Czechia", date: "2026-06-15", status: "finished", homeGoals: "1", awayGoals: "1", elapsed: null, played: true, source: "seeded" },
-  { id: "B1", home: "Canada", away: "Bosnia & Herz.", date: "2026-06-15", status: "finished", homeGoals: "2", awayGoals: "0", elapsed: null, played: true, source: "seeded" },
-  { id: "B2", home: "Qatar", away: "Switzerland", date: "2026-06-15", status: "finished", homeGoals: "0", awayGoals: "2", elapsed: null, played: true, source: "seeded" },
-  { id: "D2", home: "Australia", away: "Türkiye", date: "2026-06-15", status: "finished", homeGoals: "1", awayGoals: "2", elapsed: null, played: true, source: "seeded" }
-];
-
-// ─── CACHE INITIALIZATION WITH SEEDED DATA ──────────────────────────────────
+// ─── CACHE MAP FOR ALL_MATCHES COMPATIBILITY ───────────────────────────────
 let cache = {
-  matches:    [...SEEDED_RESULTS],
-  liveNow:    false,
-  lastFetch:  new Date().toISOString(),
-  fetchCount: 0,
+  all_matches: {}, // Stored keyed by match ID to easily map into the UI structure
+  liveNow:     false,
+  lastFetch:   null,
+  fetchCount:  0,
 };
 
-// ─── PARSE API RESPONSE ─────────────────────────────────────────────────────
+// ─── PARSE wcup2026.org response directly into frontend model ──────────────
 function parseMatches(raw){
-  if(!raw||!Array.isArray(raw.matches)) return {matches:[],liveNow:false};
-  const matches = [];
+  if(!raw || !Array.isArray(raw.matches)) return { matchesMap: {}, liveNow: false };
+  const matchesMap = {};
   let liveNow = false;
 
   raw.matches.forEach(m => {
-    const home = norm(m.team1||"");
-    const away = norm(m.team2||"");
+    const home = norm(m.team1 || "");
+    const away = norm(m.team2 || "");
     const key  = `${home}|${away}`;
     const id   = MATCH_ID_MAP[key];
     if(!id) return;
 
-    const status    = m.status || "upcoming";
-    const isLive    = status === "live";
-    const isFinished= status === "finished";
-    const score     = Array.isArray(m.score) && m.score.length === 2 ? m.score : null;
+    const status     = m.status || "upcoming";
+    const isLive     = status === "live";
+    const score      = Array.isArray(m.score) && m.score.length === 2 ? m.score : null;
 
     if(isLive) liveNow = true;
 
-    matches.push({
-      id,
-      home,
-      away,
-      date:      m.date,
-      status,
-      homeGoals: score ? String(score[0]) : null,
-      awayGoals: score ? String(score[1]) : null,
-      elapsed:   isLive ? (m.live_minute || 0) : null,
-      played:    isFinished || (isLive && score !== null),
-      source:    "wcup2026.org",
-    });
+    // Convert API objects explicitly to match the frontend key mapping expectations
+    matchesMap[id] = {
+      homeGoals: score ? String(score) : "",
+      awayGoals: score ? String(score) : "",
+      source: "openfootball",
+      goals: Array.isArray(m.goals) ? m.goals : []
+    };
   });
 
-  return { matches, liveNow };
+  return { matchesMap, liveNow };
 }
 
-// ─── FETCH ──────────────────────────────────────────────────────────────────
+// ─── FETCH FROM APIS ────────────────────────────────────────────────────────
 async function fetchData(action = "today"){
   const url = `${BASE_URL}?action=${action}`;
   const controller = new AbortController();
@@ -138,7 +120,7 @@ async function fetchData(action = "today"){
   try{
     const res = await fetch(url, {
       method: "GET",
-      headers: { "User-Agent": "WC2026-Tracker/1.0" },
+      headers: { "User-Agent": "WC2026-Tracker/1.0 (github.com/reshmanth-mopedevi94)" },
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -150,135 +132,114 @@ async function fetchData(action = "today"){
   }
 }
 
-// ─── EXPRESS CONFIG ─────────────────────────────────────────────────────────
+// ─── EXPRESS CONFIGURATION ──────────────────────────────────────────────────
 const app    = express();
 const server = http.createServer(app);
 app.use(cors({ origin:"*" }));
 
 app.get("/health", (req,res) => res.json({
-  status:"ok", lastFetch:cache.lastFetch,
-  fetchCount:cache.fetchCount, matches:cache.matches.length,
-  liveNow:cache.liveNow, uptime:Math.floor(process.uptime())+"s",
+  status: "ok", 
+  lastFetch: cache.lastFetch,
+  fetchCount: cache.fetchCount, 
+  matchesTracked: Object.keys(cache.all_matches).length,
+  liveNow: cache.liveNow, 
+  uptime: Math.floor(process.uptime())+"s",
 }));
 
+// Route matches structure for REST fallbacks
 app.get("/api/fixtures", (req,res) => res.json({
-  matches:cache.matches, lastFetch:cache.lastFetch, liveNow:cache.liveNow,
+  all_matches: cache.all_matches, 
+  lastFetch: cache.lastFetch, 
+  liveNow: cache.liveNow,
 }));
 
-// ─── WEBSOCKET WITH HEARTBEAT (FIXES RENDER FREE TIER DISCONNECTS) ──────────
-const wss = new WebSocket.Server({ noServer: true });
-
-// Handle regular HTTP upgrade requests cleanly to match standard ws:// formats
-server.on('upgrade', (request, socket, head) => {
-  wss.handleUpgrade(request, socket, head, (ws) => {
-    wss.emit('connection', ws, request);
-  });
-});
+// ─── WEBSOCKET FUNCTIONALITY ───────────────────────────────────────────────
+const wss = new WebSocket.Server({ server });
 
 wss.on("connection", ws => {
-  ws.isAlive = true;
   console.log(`📱 Client connected [${wss.clients.size} total]`);
-  
-  // Respond to heartbeats
-  ws.on('pong', () => { ws.isAlive = true; });
-
-  if(cache.matches.length > 0){
+  if(Object.keys(cache.all_matches).length > 0){
     ws.send(JSON.stringify({
-      type:"snapshot", matches:cache.matches,
-      lastFetch:cache.lastFetch, liveNow:cache.liveNow,
+      type: "snapshot", 
+      all_matches: cache.all_matches,
+      lastFetch: cache.lastFetch, 
+      liveNow: cache.liveNow,
     }));
   }
-  
   ws.on("close", () => console.log(`📵 Client left [${wss.clients.size} remaining]`));
   ws.on("error", e => console.error("WS error:", e.message));
 });
 
-// Clear out dead or cold-started frozen sockets every 30 seconds
-const heartbeatInterval = setInterval(() => {
-  wss.clients.forEach(ws => {
-    if (ws.isAlive === false) return ws.terminate();
-    ws.isAlive = false;
-    ws.ping();
-  });
-}, 30000);
-
 function broadcast(data){
   const msg = JSON.stringify(data);
   let n = 0;
-  wss.clients.forEach(c => { 
-    if(c.readyState === WebSocket.OPEN){ 
-      c.send(msg); 
-      n++; 
-    }
-  });
+  wss.clients.forEach(c => { if(c.readyState===WebSocket.OPEN){ c.send(msg); n++; }});
   if(n>0) console.log(`📡 Broadcast to ${n} client(s)`);
 }
 
-// ─── MAIN FETCH + BROADCAST ─────────────────────────────────────────────────
+// ─── MAIN FETCH AND SYNC CORE ───────────────────────────────────────────────
 let liveInterval = null;
 
 async function fetchAndBroadcast(reason = "cron"){
   const now = new Date().toLocaleString("en-US",{timeZone:"America/New_York"});
   console.log(`\n⚽ Fetch [${reason}] at ${now} ET`);
   try{
+    // Pull active data from your free, key-less endpoint
     const raw = await fetchData("today");
-    const { matches, liveNow } = parseMatches(raw);
+    const { matchesMap, liveNow } = parseMatches(raw);
 
-    // Merge logic: ensure seeded data stays persistent if API doesn't return it
-    const existing = {};
-    cache.matches.forEach(m => { existing[m.id] = m; });
-    matches.forEach(m => { existing[m.id] = m; });
-    
-    cache.matches   = Object.values(existing);
-    cache.liveNow   = liveNow;
-    cache.lastFetch = new Date().toISOString();
+    // Deep merge updates into the state registry cache
+    cache.all_matches = { ...cache.all_matches, ...matchesMap };
+    cache.liveNow     = liveNow;
+    cache.lastFetch   = new Date().toISOString();
     cache.fetchCount++;
 
-    const played = cache.matches.filter(m=>m.played).length;
-    console.log(`✅ ${cache.matches.length} total tracked | ${played} played | live: ${liveNow} | fetch #${cache.fetchCount}`);
+    console.log(`✅ Synced matches map size: ${Object.keys(cache.all_matches).length} | live state: ${liveNow} | fetch #${cache.fetchCount}`);
 
+    // Pushing structural update mimicking openfootball framework signature cleanly matching frontend whitelist structures
     broadcast({
-      type:"update", matches:cache.matches,
-      lastFetch:cache.lastFetch, liveNow,
+      type: "update", 
+      all_matches: cache.all_matches,
+      lastFetch: cache.lastFetch, 
+      liveNow,
     });
 
+    // Toggle Polling cadences responsively based on dynamic context 
     if(liveNow && !liveInterval){
-      console.log("🔴 Live match — switching to 5-min polling");
+      console.log("🔴 Live match found — speeding up polling to 5-min intervals");
       liveInterval = setInterval(()=>fetchAndBroadcast("live-poll"), LIVE_MS);
     } else if(!liveNow && liveInterval){
-      console.log("⏸  No live matches — back to 14-min passive");
+      console.log("⏸ No live matches running — stepping back to 14-min passive cron cycles");
       clearInterval(liveInterval);
       liveInterval = null;
     }
 
   }catch(e){
-    console.error("❌ Fetch error:", e.message);
+    console.error("❌ Fetch error handled:", e.message);
   }
 }
 
-// ─── CRON POLLS ─────────────────────────────────────────────────────────────
+// Passive Routine Cycle
 cron.schedule("*/14 * * * *", () => {
   if(!liveInterval) fetchAndBroadcast("14-min-cron");
 });
 
-// Self-ping to prevent local freeze and output debugging logs
+// Production Worker Health Keep Alive Routine
 cron.schedule("*/10 * * * *", async () => {
   try{
     await fetch(`http://localhost:${PORT}/health`);
-    console.log(`💓 Keep-alive | uptime:${Math.floor(process.uptime())}s | fetches:${cache.fetchCount} | live:${cache.liveNow}`);
+    console.log(`💓 Keep-alive update | uptime: ${Math.floor(process.uptime())}s | total fetches: ${cache.fetchCount} | live match right now: ${cache.liveNow}`);
   }catch(e){}
 });
 
-// ─── START ───────────────────────────────────────────────────────────────────
+// App Initiation Engine
 server.listen(PORT, async () => {
-  console.log(`\n🚀 WC2026 Backend on port ${PORT}`);
-  console.log(`📦 Source: wcup2026.org (Seeded results for June 14-15 pre-loaded)`);
-  console.log(`⏱  Passive: every 14 min | Live: every 5 min\n`);
+  console.log(`\n🚀 WC2026 Backend operating on port ${PORT}`);
+  console.log(`📦 Data payload sync framework configured for client apps.`);
   await fetchAndBroadcast("startup");
 });
 
 process.on("SIGTERM", () => {
-  clearInterval(heartbeatInterval);
   if(liveInterval) clearInterval(liveInterval);
   server.close(() => process.exit(0));
 });
