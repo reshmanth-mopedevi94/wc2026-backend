@@ -2,11 +2,8 @@
  * WC2026 Live Score Backend - Fixed Compatibility Edition
  * ─────────────────────────────────────────────────────────
  * Data: wcup2026.org — free, no API key, live scores + results
- * Endpoints:
- * today:  https://wcup2026.org/api/data.php?action=today
- * all:    https://wcup2026.org/api/data.php?action=all
  * Polls every 14 min passive, every 5 min when live match detected
- * Broadcasts via WebSocket to all clients in the format expected by App.jsx
+ * Broadcasts via WebSocket to all clients in the exact format expected by App.jsx
  */
 
 require("dotenv").config();
@@ -73,17 +70,17 @@ const MATCH_ID_MAP = {
 
 function norm(name){ return TEAM_MAP[name] || name; }
 
-// ─── CACHE MAP FOR ALL_MATCHES COMPATIBILITY ───────────────────────────────
+// ─── CACHE MANAGEMENT ────────────────────────────────────────────────────────
 let cache = {
-  all_matches: {}, // Stored keyed by match ID to easily map into the UI structure
+  all_matches: {}, // Store matches keyed by Group ID (B1, I1, J1, etc.) to match frontend's expected whitelist structure
   liveNow:     false,
   lastFetch:   null,
   fetchCount:  0,
 };
 
-// ─── PARSE wcup2026.org response directly into frontend model ──────────────
-function parseMatches(raw){
-  if(!raw || !Array.isArray(raw.matches)) return { matchesMap: {}, liveNow: false };
+// ─── EXTRACT AND TRANSLATE TO OPENFOOTBALL SIGNATURE ──────────────────────────
+function parseMatches(raw) {
+  if (!raw || !Array.isArray(raw.matches)) return { matchesMap: {}, liveNow: false };
   const matchesMap = {};
   let liveNow = false;
 
@@ -92,18 +89,19 @@ function parseMatches(raw){
     const away = norm(m.team2 || "");
     const key  = `${home}|${away}`;
     const id   = MATCH_ID_MAP[key];
-    if(!id) return;
+    if (!id) return;
 
-    const status     = m.status || "upcoming";
-    const isLive     = status === "live";
-    const score      = Array.isArray(m.score) && m.score.length === 2 ? m.score : null;
+    const status = m.status || "upcoming";
+    if (status === "live") liveNow = true;
 
-    if(isLive) liveNow = true;
+    // Convert the open API data fields into string values matching the App.jsx parser whitelist
+    const hGoals = (m.homeGoals !== undefined && m.homeGoals !== null) ? String(m.homeGoals) : "";
+    const aGoals = (m.awayGoals !== undefined && m.awayGoals !== null) ? String(m.awayGoals) : "";
 
-    // Convert API objects explicitly to match the frontend key mapping expectations
+    // Build the format expected by App.jsx line 457 (data.all_matches)
     matchesMap[id] = {
-      homeGoals: score ? String(score) : "",
-      awayGoals: score ? String(score) : "",
+      homeGoals: hGoals,
+      awayGoals: aGoals,
       source: "openfootball",
       goals: Array.isArray(m.goals) ? m.goals : []
     };
@@ -112,134 +110,136 @@ function parseMatches(raw){
   return { matchesMap, liveNow };
 }
 
-// ─── FETCH FROM APIS ────────────────────────────────────────────────────────
-async function fetchData(action = "today"){
+// ─── UTILITY API CONSUMER ───────────────────────────────────────────────────
+async function fetchData(action = "all") {
   const url = `${BASE_URL}?action=${action}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
-  try{
+  try {
     const res = await fetch(url, {
       method: "GET",
-      headers: { "User-Agent": "WC2026-Tracker/1.0 (github.com/reshmanth-mopedevi94)" },
+      headers: { "User-Agent": "WC2026-Tracker/1.0" },
       signal: controller.signal,
     });
     clearTimeout(timeout);
-    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
-  }catch(e){
+  } catch (e) {
     clearTimeout(timeout);
     throw e;
   }
 }
 
-// ─── EXPRESS CONFIGURATION ──────────────────────────────────────────────────
+// ─── EXPRESS SERVER CONFIGURATION ───────────────────────────────────────────
 const app    = express();
 const server = http.createServer(app);
-app.use(cors({ origin:"*" }));
+app.use(cors({ origin: "*" }));
 
-app.get("/health", (req,res) => res.json({
+app.get("/health", (req, res) => res.json({
   status: "ok", 
   lastFetch: cache.lastFetch,
   fetchCount: cache.fetchCount, 
   matchesTracked: Object.keys(cache.all_matches).length,
-  liveNow: cache.liveNow, 
-  uptime: Math.floor(process.uptime())+"s",
+  liveNow: cache.liveNow,
+  uptime: Math.floor(process.uptime()) + "s"
 }));
 
-// Route matches structure for REST fallbacks
-app.get("/api/fixtures", (req,res) => res.json({
+// Serves the data payload during REST polling fallbacks (App.jsx line 506)
+app.get("/api/fixtures", (req, res) => res.json({
   all_matches: cache.all_matches, 
   lastFetch: cache.lastFetch, 
-  liveNow: cache.liveNow,
+  liveNow: cache.liveNow
 }));
 
-// ─── WEBSOCKET FUNCTIONALITY ───────────────────────────────────────────────
+// ─── WEBSOCKET ROUTING ──────────────────────────────────────────────────────
 const wss = new WebSocket.Server({ server });
 
 wss.on("connection", ws => {
-  console.log(`📱 Client connected [${wss.clients.size} total]`);
-  if(Object.keys(cache.all_matches).length > 0){
-    ws.send(JSON.stringify({
-      type: "snapshot", 
-      all_matches: cache.all_matches,
-      lastFetch: cache.lastFetch, 
-      liveNow: cache.liveNow,
-    }));
-  }
+  console.log(`📱 Client connection initialized [${wss.clients.size} connected]`);
+  // Push the current match standings mapping immediately upon connection
+  ws.send(JSON.stringify({
+    type: "snapshot", 
+    all_matches: cache.all_matches,
+    lastFetch: cache.lastFetch, 
+    liveNow: cache.liveNow
+  }));
   ws.on("close", () => console.log(`📵 Client left [${wss.clients.size} remaining]`));
-  ws.on("error", e => console.error("WS error:", e.message));
+  ws.on("error", e => console.error("WS client stream error:", e.message));
 });
 
-function broadcast(data){
+function broadcast(data) {
   const msg = JSON.stringify(data);
-  let n = 0;
-  wss.clients.forEach(c => { if(c.readyState===WebSocket.OPEN){ c.send(msg); n++; }});
-  if(n>0) console.log(`📡 Broadcast to ${n} client(s)`);
+  let activeClients = 0;
+  wss.clients.forEach(c => { 
+    if (c.readyState === WebSocket.OPEN) { 
+      c.send(msg); 
+      activeClients++; 
+    }
+  });
+  if (activeClients > 0) console.log(`📡 Broadcasted update payload to ${activeClients} client(s).`);
 }
 
-// ─── MAIN FETCH AND SYNC CORE ───────────────────────────────────────────────
+// ─── EXTRACTION ENGINE ──────────────────────────────────────────────────────
 let liveInterval = null;
 
-async function fetchAndBroadcast(reason = "cron"){
-  const now = new Date().toLocaleString("en-US",{timeZone:"America/New_York"});
-  console.log(`\n⚽ Fetch [${reason}] at ${now} ET`);
-  try{
-    // Pull active data from your free, key-less endpoint
-    const raw = await fetchData("today");
+async function fetchAndBroadcast(reason = "cron") {
+  const timeLabel = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
+  console.log(`\n⚽ Pulling data pipeline [Trigger: ${reason}] at ${timeLabel} EST`);
+  try {
+    // Pull full database results to guarantee historic rows like Group I/J are populated
+    const raw = await fetchData("all");
     const { matchesMap, liveNow } = parseMatches(raw);
 
-    // Deep merge updates into the state registry cache
+    // Deep merge into local memory cache to keep tracking stable
     cache.all_matches = { ...cache.all_matches, ...matchesMap };
     cache.liveNow     = liveNow;
     cache.lastFetch   = new Date().toISOString();
     cache.fetchCount++;
 
-    console.log(`✅ Synced matches map size: ${Object.keys(cache.all_matches).length} | live state: ${liveNow} | fetch #${cache.fetchCount}`);
+    console.log(`✅ Cache updated. Map contains ${Object.keys(cache.all_matches).length} matches. Live state: ${liveNow}`);
 
-    // Pushing structural update mimicking openfootball framework signature cleanly matching frontend whitelist structures
+    // Broadcast the updated structure to the clients
     broadcast({
       type: "update", 
       all_matches: cache.all_matches,
       lastFetch: cache.lastFetch, 
-      liveNow,
+      liveNow
     });
 
-    // Toggle Polling cadences responsively based on dynamic context 
-    if(liveNow && !liveInterval){
-      console.log("🔴 Live match found — speeding up polling to 5-min intervals");
-      liveInterval = setInterval(()=>fetchAndBroadcast("live-poll"), LIVE_MS);
-    } else if(!liveNow && liveInterval){
-      console.log("⏸ No live matches running — stepping back to 14-min passive cron cycles");
+    // Handle dynamic polling speed based on whether matches are live
+    if (liveNow && !liveInterval) {
+      console.log("🔴 Live matches active — setting interval to 5 minutes.");
+      liveInterval = setInterval(() => fetchAndBroadcast("live-poll"), LIVE_MS);
+    } else if (!liveNow && liveInterval) {
+      console.log("⏸ No active live matches — dropping down to passive cron cadence.");
       clearInterval(liveInterval);
       liveInterval = null;
     }
 
-  }catch(e){
-    console.error("❌ Fetch error handled:", e.message);
+  } catch (e) {
+    console.error("❌ API Fetch pipeline exception handled safely:", e.message);
   }
 }
 
-// Passive Routine Cycle
+// Passive Poll Task Sequence (Runs every 14 minutes as scheduled in your frontend configurations)
 cron.schedule("*/14 * * * *", () => {
-  if(!liveInterval) fetchAndBroadcast("14-min-cron");
+  if (!liveInterval) fetchAndBroadcast("14-min-cron");
 });
 
-// Production Worker Health Keep Alive Routine
+// Server Process Worker Keep-Alive Health Probe Loop
 cron.schedule("*/10 * * * *", async () => {
-  try{
+  try {
     await fetch(`http://localhost:${PORT}/health`);
-    console.log(`💓 Keep-alive update | uptime: ${Math.floor(process.uptime())}s | total fetches: ${cache.fetchCount} | live match right now: ${cache.liveNow}`);
-  }catch(e){}
+  } catch (e) {}
 });
 
-// App Initiation Engine
+// App Initiation
 server.listen(PORT, async () => {
-  console.log(`\n🚀 WC2026 Backend operating on port ${PORT}`);
-  console.log(`📦 Data payload sync framework configured for client apps.`);
-  await fetchAndBroadcast("startup");
+  console.log(`\n🚀 WC2026 Service successfully bound to local port ${PORT}`);
+  await fetchAndBroadcast("initial-startup-sync");
 });
 
 process.on("SIGTERM", () => {
-  if(liveInterval) clearInterval(liveInterval);
+  if (liveInterval) clearInterval(liveInterval);
   server.close(() => process.exit(0));
 });
